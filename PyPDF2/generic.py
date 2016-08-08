@@ -43,11 +43,12 @@ from . import filters
 from . import utils
 import decimal
 import codecs
+import sys
 #import debugging
 
 ObjectPrefix = b_('/<[tf(n%')
 NumberSigns = b_('+-')
-IndirectPattern = re.compile(b_(r"(\d+)\s+(\d+)\s+R[^a-zA-Z]"))
+IndirectPattern = re.compile(b_(r"[+-]?(\d+)\s+(\d+)\s+R[^a-zA-Z]"))
 
 
 def readObject(stream, pdf):
@@ -86,9 +87,6 @@ def readObject(stream, pdf):
         return readObject(stream, pdf)
     else:
         # number object OR indirect reference
-        if tok in NumberSigns:
-            # number
-            return NumberObject.readFromStream(stream)
         peek = stream.read(20)
         stream.seek(-len(peek), 1) # reset to start
         if IndirectPattern.match(peek) != None:
@@ -233,8 +231,12 @@ class FloatObject(decimal.Decimal, PdfObject):
         if self == self.to_integral():
             return str(self.quantize(decimal.Decimal(1), context=decimal.ExtendedContext))
         else:
-            # XXX: this adds useless extraneous zeros.
-            return "%.5f" % self
+            # Standard formatting adds useless extraneous zeros.
+            o = "%.5f" % self
+            # Remove the zeros.
+            while o and o[-1] == '0':
+                o = o[:-1]
+            return o
 
     def as_numeric(self):
         return float(b_(repr(self)))
@@ -248,7 +250,11 @@ class NumberObject(int, PdfObject):
     ByteDot = b_(".")
 
     def __new__(cls, value):
-        return int.__new__(cls, value)
+        val = int(value)
+        try:
+            return int.__new__(cls, val)
+        except OverflowError:
+            return int.__new__(cls, 0)
 
     def as_numeric(self):
         return int(b_(repr(self)))
@@ -340,13 +346,18 @@ def readStringFromStream(stream):
                 tok = b_("\b")
             elif tok == b_("f"):
                 tok = b_("\f")
+            elif tok == b_("c"):
+                tok = b_("\c")
             elif tok == b_("("):
                 tok = b_("(")
             elif tok == b_(")"):
                 tok = b_(")")
+            elif tok == b_("/"):
+                tok = b_("/")
             elif tok == b_("\\"):
                 tok = b_("\\")
-            elif tok in (b_(" "), b_("/"), b_("%"), b_("<"), b_(">"), b_("["), b_("]"), b_("#")):
+            elif tok in (b_(" "), b_("/"), b_("%"), b_("<"), b_(">"), b_("["), 
+                    b_("]"), b_("#"),  b_("_"), b_("&"), b_('$')):
                 # odd/unnessecary escape sequences we have encountered
                 tok = b_(tok)
             elif tok.isdigit():
@@ -373,7 +384,7 @@ def readStringFromStream(stream):
                 # line break was escaped:
                 tok = b_('')
             else:
-                raise utils.PdfReadError("Unexpected escaped string")
+                raise utils.PdfReadError(r"Unexpected escaped string: %s" % tok)
         txt += tok
     return createStringObject(txt)
 
@@ -451,7 +462,7 @@ class TextStringObject(utils.string_type, PdfObject):
 
 
 class NameObject(str, PdfObject):
-    delimiterPattern = re.compile(b_("\s+|[()<>[\]{}/%]"))
+    delimiterPattern = re.compile(b_(r"\s+|[\(\)<>\[\]{}/%]"))
     surfix = b_("/")
 
     def writeToStream(self, stream, encryption_key):
@@ -463,7 +474,8 @@ class NameObject(str, PdfObject):
         name = stream.read(1)
         if name != NameObject.surfix:
             raise utils.PdfReadError("name read error")
-        name += utils.readUntilRegex(stream, NameObject.delimiterPattern)
+        name += utils.readUntilRegex(stream, NameObject.delimiterPattern, 
+            ignore_eof=True)
         if debug: print(name)
         try:
             return NameObject(name.decode('utf-8'))
